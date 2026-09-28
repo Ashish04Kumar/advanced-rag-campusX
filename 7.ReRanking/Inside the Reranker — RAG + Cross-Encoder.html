@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Inside the Reranker — RAG + Cross-Encoder, step by step</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0a0d14; --bg2:#0d1120;
+  --panel:rgba(22,28,42,.66); --panel2:rgba(22,28,42,.9);
+  --border:rgba(147,166,205,.16); --border2:rgba(147,166,205,.3);
+  --text:#e7ecf6; --muted:#8b93a8; --muted2:#5c6478;
+  --query:#4fd1c5; --querydim:rgba(79,209,197,.15);
+  --doc:#f2a93c; --docdim:rgba(242,169,60,.15);
+  --attn:#a78bfa; --attndim:rgba(167,139,250,.18);
+  --good:#5eead4; --bad:#fb7185;
+  padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);
+  box-sizing:border-box;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{
+  background:
+    radial-gradient(ellipse 900px 500px at 15% -10%, rgba(79,209,197,.08), transparent 60%),
+    radial-gradient(ellipse 800px 500px at 100% 10%, rgba(167,139,250,.08), transparent 60%),
+    linear-gradient(var(--bg2), var(--bg) 40%);
+  background-attachment:fixed;
+  color:var(--text); font-family:'Inter',sans-serif; -webkit-font-smoothing:antialiased;
+  background-image:
+    radial-gradient(ellipse 900px 500px at 15% -10%, rgba(79,209,197,.08), transparent 60%),
+    radial-gradient(ellipse 800px 500px at 100% 10%, rgba(167,139,250,.08), transparent 60%),
+    linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px),
+    linear-gradient(var(--bg2), var(--bg) 40%);
+  background-size:auto,auto,42px 42px,42px 42px,auto;
+}
+h1,h2,h3,.disp{font-family:'Space Grotesk',sans-serif}
+.mono{font-family:'IBM Plex Mono',monospace}
+::-webkit-scrollbar{height:8px;width:8px}::-webkit-scrollbar-thumb{background:var(--border2);border-radius:4px}
+
+header{padding:26px clamp(16px,4vw,48px) 10px}
+header .eyebrow{color:var(--query);font-size:12.5px;letter-spacing:.04em;margin:0 0 6px}
+header h1{font-size:clamp(22px,3.4vw,34px);margin:0 0 6px;font-weight:600;line-height:1.15}
+header p{color:var(--muted);max-width:640px;margin:0;font-size:14.5px;line-height:1.55}
+
+/* pipeline strip */
+.pipe{display:flex;gap:6px;overflow-x:auto;padding:18px clamp(16px,4vw,48px);margin:0 0 4px;scrollbar-width:thin}
+.pipe button{
+  flex:0 0 auto; background:var(--panel); border:1px solid var(--border); color:var(--muted);
+  padding:9px 13px; border-radius:10px; font-family:'IBM Plex Mono',monospace; font-size:12px; cursor:pointer;
+  white-space:nowrap; transition:.2s; backdrop-filter:blur(10px);
+}
+.pipe button:hover{border-color:var(--border2);color:var(--text)}
+.pipe button.active{background:var(--querydim);border-color:var(--query);color:var(--query)}
+.pipe span.arrow{color:var(--muted2);align-self:center;font-size:13px}
+
+/* controls */
+.controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:0 clamp(16px,4vw,48px) 18px;position:sticky;top:0;z-index:5}
+.controls .grp{display:flex;gap:4px;background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:4px;backdrop-filter:blur(14px)}
+.controls button{background:transparent;border:none;color:var(--muted);padding:8px 12px;border-radius:8px;font-size:13px;cursor:pointer;font-family:'IBM Plex Mono',monospace;transition:.15s}
+.controls button:hover{color:var(--text);background:rgba(255,255,255,.06)}
+.controls button.on{background:var(--query);color:#04211d;font-weight:600}
+.controls .step-count{color:var(--muted2);font-size:12px;font-family:'IBM Plex Mono',monospace;margin-left:4px}
+#playfull{background:linear-gradient(135deg,var(--query),#38bdf8);color:#04211d;font-weight:600;border:none;padding:9px 16px;border-radius:10px;cursor:pointer;font-family:'IBM Plex Mono',monospace;font-size:12.5px}
+
+/* layout */
+main{display:grid;grid-template-columns:1fr 300px;gap:16px;padding:0 clamp(16px,4vw,48px) 40px;align-items:start}
+@media(max-width:880px){main{grid-template-columns:1fr}}
+
+.stage{
+  background:var(--panel); border:1px solid var(--border); border-radius:18px; min-height:480px;
+  padding:26px; backdrop-filter:blur(16px); position:relative; overflow:hidden;
+}
+.stage-title{font-family:'Space Grotesk';font-size:19px;margin:0 0 4px;color:var(--text)}
+.stage-tag{color:var(--muted2);font-size:11.5px;font-family:'IBM Plex Mono';letter-spacing:.03em;margin-bottom:18px}
+.stage-body{min-height:360px;display:flex;flex-direction:column;justify-content:center;gap:16px}
+
+aside.panel{background:var(--panel);border:1px solid var(--border);border-radius:18px;padding:22px;backdrop-filter:blur(16px);position:sticky;top:86px}
+aside.panel h3{margin:0 0 8px;font-size:15px;color:var(--query)}
+aside.panel p{margin:0;color:var(--muted);font-size:13.5px;line-height:1.6}
+aside.panel .warn{margin-top:14px;padding:10px 12px;background:rgba(251,113,133,.08);border:1px solid rgba(251,113,133,.25);border-radius:10px;font-size:12px;color:#fda4af;display:none}
+aside.panel .warn.show{display:block}
+
+/* generic elements */
+.flow{display:flex;align-items:center;justify-content:center;gap:14px;flex-wrap:wrap}
+.arrow-down{text-align:center;color:var(--muted2);font-size:20px;margin:2px 0}
+.card{background:rgba(255,255,255,.04);border:1px solid var(--border);border-radius:12px;padding:14px 16px}
+.chip{display:inline-flex;align-items:center;padding:6px 11px;border-radius:8px;font-family:'IBM Plex Mono';font-size:12.5px;border:1px solid var(--border2);background:rgba(255,255,255,.05);animation:pop .35s ease both}
+.chip.q{border-color:var(--query);color:var(--query);background:var(--querydim)}
+.chip.d{border-color:var(--doc);color:var(--doc);background:var(--docdim)}
+.chip.special{border-color:var(--attn);color:var(--attn);background:var(--attndim);font-weight:600}
+@keyframes pop{from{opacity:0;transform:translateY(6px) scale(.94)}to{opacity:1;transform:none}}
+.grid-mini{display:grid;grid-template-columns:repeat(auto-fill,minmax(58px,1fr));gap:6px;max-width:560px;margin:0 auto}
+.dot{width:100%;aspect-ratio:1;border-radius:6px;background:rgba(255,255,255,.04);border:1px solid var(--border)}
+.dot.lit{background:var(--querydim);border-color:var(--query)}
+.center-txt{text-align:center;color:var(--muted);font-size:13px}
+.big-label{text-align:center;font-family:'Space Grotesk';font-size:15px;color:var(--text);letter-spacing:.01em}
+.vecbox{display:flex;gap:3px;font-family:'IBM Plex Mono';font-size:10.5px;color:var(--muted)}
+.vecbox span{background:rgba(255,255,255,.05);border:1px solid var(--border);padding:2px 5px;border-radius:4px}
+.score-badge{font-family:'IBM Plex Mono';font-weight:600;padding:2px 9px;border-radius:7px;font-size:12.5px}
+.score-good{color:var(--good);background:rgba(94,234,212,.12)}
+.score-bad{color:var(--bad);background:rgba(251,113,133,.1)}
+.score-mid{color:#fbbf24;background:rgba(251,191,36,.1)}
+table.scores{width:100%;max-width:480px;margin:0 auto;border-collapse:collapse;font-family:'IBM Plex Mono';font-size:12.5px}
+table.scores td{padding:6px 8px;border-bottom:1px solid var(--border);color:var(--muted)}
+table.scores tr.top td{color:var(--text)}
+
+/* cross-encoder chamber */
+.ce-head{text-align:center;margin-bottom:6px}
+.ce-q{color:var(--query);font-size:11px;letter-spacing:.04em;margin-bottom:3px}
+.ce-qtext{font-family:'IBM Plex Mono';font-size:13px;color:var(--text)}
+.ce-pair{text-align:center;color:var(--doc);font-size:12.5px;font-family:'IBM Plex Mono';margin-bottom:16px}
+.ce-machine{background:rgba(0,0,0,.22);border:1px solid var(--border);border-radius:14px;padding:22px;min-height:260px;display:flex;flex-direction:column;justify-content:center;gap:12px}
+.token-row{display:flex;gap:6px;flex-wrap:wrap;justify-content:center}
+.layer-stack{display:flex;flex-direction:column-reverse;gap:6px;align-items:center;max-width:340px;margin:0 auto}
+.layer{width:100%;text-align:center;padding:8px;border-radius:8px;border:1px solid var(--border);background:rgba(255,255,255,.03);font-family:'IBM Plex Mono';font-size:11.5px;color:var(--muted2);transition:.4s}
+.layer.active{border-color:var(--query);color:var(--query);background:var(--querydim);box-shadow:0 0 18px -4px var(--query)}
+.layer.done{color:var(--muted);border-color:var(--border2)}
+.headwrap{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;max-width:520px;margin:0 auto}
+.barrow{display:flex;flex-direction:column;gap:9px;max-width:380px;margin:0 auto}
+.bar-item{display:grid;grid-template-columns:96px 1fr 46px;align-items:center;gap:8px}
+.bar-label{font-family:'IBM Plex Mono';font-size:11px;color:var(--muted);text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bar-track{height:13px;background:rgba(255,255,255,.05);border-radius:7px;overflow:hidden;border:1px solid var(--border)}
+.bar-fill{height:100%;width:0%;background:linear-gradient(90deg,var(--attn),var(--query));transition:width 1.1s cubic-bezier(.3,.9,.3,1);border-radius:7px}
+.bar-val{font-family:'IBM Plex Mono';font-size:11px;color:var(--text)}
+.qkv-row{display:flex;justify-content:center;gap:22px;flex-wrap:wrap}
+.qkv-col{text-align:center}
+.qkv-col .tag{font-family:'IBM Plex Mono';font-size:10.5px;letter-spacing:.03em;margin-bottom:6px}
+.mergevec{display:flex;justify-content:center}
+.ce-subnav{display:none;flex-wrap:wrap;gap:6px;margin-bottom:16px;padding-bottom:14px;border-bottom:1px solid var(--border)}
+.ce-subnav.show{display:flex}
+.ce-subnav button{background:rgba(255,255,255,.04);border:1px solid var(--border);color:var(--muted);font-family:'IBM Plex Mono';font-size:11px;padding:6px 10px;border-radius:8px;cursor:pointer;transition:.15s;white-space:nowrap}
+.ce-subnav button:hover{color:var(--text);border-color:var(--border2)}
+.ce-subnav button.active{background:var(--attndim);border-color:var(--attn);color:var(--attn);font-weight:600}
+
+.headbox{border:1px solid var(--border);border-radius:10px;padding:8px;text-align:center}
+.headbox svg{width:100%;height:60px}
+.headbox .lbl{font-family:'IBM Plex Mono';font-size:10px;color:var(--muted2);margin-top:4px}
+.cls-glow{animation:glow 1.6s ease-in-out infinite}
+@keyframes glow{0%,100%{box-shadow:0 0 0px var(--attn)}50%{box-shadow:0 0 26px 2px var(--attn)}}
+.fade60{opacity:.35;filter:saturate(.5)}
+.score-big{font-family:'Space Grotesk';font-size:52px;text-align:center;font-weight:700;color:var(--good)}
+.ffn-flow{display:flex;flex-direction:column;gap:6px;max-width:280px;margin:0 auto}
+.ffn-flow .step{padding:9px 12px;border-radius:8px;border:1px solid var(--border);text-align:center;font-family:'IBM Plex Mono';font-size:12px;color:var(--muted2);transition:.3s}
+.ffn-flow .step.active{border-color:var(--attn);color:var(--attn);background:var(--attndim)}
+
+.rerank-cols{display:flex;gap:28px;justify-content:center;flex-wrap:wrap}
+.rerank-col h4{text-align:center;font-family:'IBM Plex Mono';font-size:11px;color:var(--muted2);margin:0 0 8px;letter-spacing:.04em}
+.rerank-list{display:flex;flex-direction:column;gap:6px;width:180px}
+.rerank-item{display:flex;justify-content:space-between;padding:7px 10px;border-radius:8px;border:1px solid var(--border);background:rgba(255,255,255,.03);font-family:'IBM Plex Mono';font-size:12px;transition:.6s cubic-bezier(.4,0,.2,1)}
+.rerank-item.top5{border-color:var(--good);background:rgba(94,234,212,.08)}
+.rerank-item.faded{opacity:.3}
+
+.answer-box{max-width:520px;margin:0 auto;border-left:2px solid var(--query);padding:12px 16px;background:rgba(255,255,255,.03);border-radius:0 10px 10px 0;font-size:13.5px;line-height:1.6;color:var(--text)}
+footer{text-align:center;color:var(--muted2);font-size:11.5px;padding:10px 0 34px}
+svg text{font-family:'IBM Plex Mono',monospace}
+</style>
+</head>
+<body>
+<header>
+  <p class="eyebrow mono">RAG · RETRIEVAL &amp; RERANKING</p>
+  <h1>Why a retriever alone isn't enough — and what the Cross-Encoder actually does inside</h1>
+  <p>An interactive walkthrough from raw documents to a reranked, LLM-ready answer — with the Cross-Encoder's Transformer opened up so you can watch tokenization, attention and scoring happen for a single query–document pair.</p>
+</header>
+
+<div class="pipe" id="pipe"></div>
+
+<div class="controls">
+  <div class="grp">
+    <button id="btnPrev">⟵ Prev</button>
+    <button id="btnPlay">▶ Play</button>
+    <button id="btnNext">Next ⟶</button>
+    <button id="btnRestart">↺ Restart</button>
+  </div>
+  <div class="grp">
+    <button data-spd="0.5">0.5x</button>
+    <button data-spd="1" class="on">1x</button>
+    <button data-spd="2">2x</button>
+  </div>
+  <button id="playfull">▶ Play Full Pipeline</button>
+  <span class="step-count" id="stepCount"></span>
+</div>
+
+<main>
+  <div class="stage">
+    <div class="stage-tag mono" id="stageTag"></div>
+    <h2 class="stage-title" id="stageTitle"></h2>
+    <div class="ce-subnav" id="ceSubnav"></div>
+    <div class="stage-body" id="stageBody"></div>
+  </div>
+  <aside class="panel">
+    <h3 id="panelTitle">Retriever</h3>
+    <p id="panelText"></p>
+    <div class="warn" id="panelWarn"></div>
+  </aside>
+</main>
+<footer>Educational visualization · scores and vectors are illustrative, not a live model.</footer>
+
+<script>
+const QUERY = "How does JWT authentication work in React?";
+const QTOK = ["[How]","[does]","[JWT]","[authentication]","[work]","[in]","[React]","[?]"];
+const DTOK = ["[JWT]","[authentication]","[in]","[React]","[uses]","[access]","[tokens]","[…]"];
+const CAND = [
+  {id:17, ret:0.91, ce:0.96, text:"JWT authentication in React uses access tokens…"},
+  {id:42, ret:0.89, ce:0.41, text:"React state management with Redux…"},
+  {id:5,  ret:0.87, ce:0.89, text:"Refresh tokens and JWT expiry handling…"},
+  {id:9,  ret:0.85, ce:0.72, text:"Session cookies vs token-based auth…"},
+  {id:31, ret:0.84, ce:0.95, text:"Storing JWTs securely in a React SPA…"},
+  {id:8,  ret:0.82, ce:0.31, text:"CSS-in-JS styling patterns for React…"}
+];
+const PIPE = ["Documents","Chunking","Embedding","Vector DB","Query","Query Embed","Vector Search","Candidates","Cross-Encoder","Scores","Reranking","LLM · Answer"];
+
+function scoreClass(v){return v>=0.8?'score-good':v>=0.55?'score-mid':'score-bad';}
+function attnSVG(){
+  const q=['How','does','JWT','auth','work','in','React','?'];
+  const d=['JWT','auth','in','React','uses','access','tokens','…'];
+  const qy=q.map((_,i)=>18+i*16), dy=d.map((_,i)=>18+i*16);
+  const strong=[[2,0],[3,1],[6,3],[4,6],[1,4]]; // learned, high-weight cross connections
+  let bg='', glow='', qlab='', dlab='';
+  q.forEach((t,i)=>qlab+=`<text x="12" y="${qy[i]+4}" fill="var(--query)" font-size="10">${t}</text>`);
+  d.forEach((t,i)=>dlab+=`<text x="268" y="${dy[i]+4}" fill="var(--doc)" font-size="10" text-anchor="end">${t}</text>`);
+  for(let qi=0;qi<8;qi++)for(let di=0;di<8;di++){
+    const w=0.05+(((qi*3+di*7)%6)/38);
+    bg+=`<path d="M96,${qy[qi]} C160,${qy[qi]} 200,${dy[di]} 272,${dy[di]}" stroke="var(--attn)" stroke-width="${(0.5+w*1.5).toFixed(2)}" fill="none" opacity="${w.toFixed(2)}"/>`;
+  }
+  strong.forEach(([qi,di])=>{
+    glow+=`<path d="M96,${qy[qi]} C160,${qy[qi]} 200,${dy[di]} 272,${dy[di]}" stroke="var(--attn)" stroke-width="2.2" fill="none" opacity=".95" stroke-dasharray="6 4"><animate attributeName="stroke-dashoffset" from="60" to="0" dur="1.3s" repeatCount="indefinite"/></path>`;
+  });
+  const qArcs=[[0,2],[3,4],[2,6]], dArcs=[[0,1],[3,6]];
+  let ctx='';
+  qArcs.forEach(([a,b])=>{ctx+=`<path d="M96,${qy[a]} C58,${(qy[a]+qy[b])/2} 58,${(qy[a]+qy[b])/2} 96,${qy[b]}" stroke="var(--query)" stroke-width="1" fill="none" opacity=".4"/>`;});
+  dArcs.forEach(([a,b])=>{ctx+=`<path d="M272,${dy[a]} C312,${(dy[a]+dy[b])/2} 312,${(dy[a]+dy[b])/2} 272,${dy[b]}" stroke="var(--doc)" stroke-width="1" fill="none" opacity=".4"/>`;});
+  return `<svg viewBox="0 0 340 150" style="max-width:460px;margin:0 auto;display:block">${ctx}${bg}${glow}${qlab}${dlab}</svg>`;
+}
+function miniHead(seed){
+  let l='';
+  for(let i=0;i<4;i++){
+    const y1=14+i*14, y2=14+((i+seed)%4)*14;
+    l+=`<path d="M6,${y1} C24,${y1} 30,${y2} 54,${y2}" stroke="var(--attn)" stroke-width="1.3" fill="none" opacity="${0.4+ (i%2)*0.4}"/>`;
+  }
+  return `<svg viewBox="0 0 60 60">${l}</svg>`;
+}
+function barChart(id,rows){
+  return `<div class="barrow" id="${id}">${rows.map(r=>`<div class="bar-item"><span class="bar-label">${r.l}</span><div class="bar-track"><div class="bar-fill" style="width:0%" data-t="${r.w}"></div></div><span class="bar-val">${r.v}</span></div>`).join('')}</div>`;
+}
+function animateBars(id){
+  const el=document.getElementById(id); if(!el) return;
+  requestAnimationFrame(()=>requestAnimationFrame(()=>{ el.querySelectorAll('.bar-fill').forEach(b=>{b.style.width=b.dataset.t+'%';}); }));
+}
+function qkvVec(label,cls){
+  const mk=()=>Array.from({length:4},()=>(Math.random()*2-1).toFixed(2));
+  return `<div class="qkv-col"><div class="tag" style="color:var(--${cls})">${label}</div><div class="vecbox" style="justify-content:center">${mk().map(n=>`<span>${n}</span>`).join('')}</div></div>`;
+}
+function ceHeader(pair,note){
+  return `<div class="ce-head"><div class="ce-q mono">QUERY</div><div class="ce-qtext">"${QUERY}"</div></div>
+  <div class="ce-pair">+ Chunk ${pair.id} <span style="color:var(--muted2)">— "${pair.text}"</span></div>`;
+}
+function tokRow(cls){
+  return `<div class="token-row">
+    <span class="chip special">[CLS]</span>
+    ${QTOK.map(t=>`<span class="chip q">${t}</span>`).join('')}
+    <span class="chip special">[SEP]</span>
+    ${DTOK.map(t=>`<span class="chip d">${t}</span>`).join('')}
+    <span class="chip special">[SEP]</span>
+  </div>`;
+}
+function vecRow(){
+  const mk=()=>Array.from({length:4},()=>(Math.random()*2-1).toFixed(2));
+  return `<div class="token-row">` + ['[CLS]',...QTOK.slice(0,3),'…',...DTOK.slice(0,3)].map(t=>
+    `<div style="text-align:center"><div class="chip ${t.includes('JWT')||t.includes('access')?'d':(t==='[CLS]'?'special':'q')}" style="font-size:11px">${t}</div>
+     <div class="vecbox" style="justify-content:center;margin-top:4px">${mk().map(n=>`<span>${n}</span>`).join('')}</div></div>`).join('') + `</div>
+     <div class="center-txt" style="margin-top:6px">Token Embedding&nbsp;+&nbsp;Position Information → Transformer input representations</div>`;
+}
+const P = CAND[0];
+const layerNames = ['Layer 1','Layer 2','Layer 3','Layer 4','Layer 5','Layer 6'];
+
+const STEPS = [
+{stage:0, tag:'INDEXING · 1 OF 4', title:'A large document library', panel:['Documents','Before any question is asked, documents are prepared and stored — this happens once, offline, during indexing.'],
+ body:`<div class="card" style="max-width:520px;margin:0 auto"><div class="center-txt" style="text-align:left;color:var(--text)">"JWT authentication is commonly used in web applications to securely transmit information between a client and a server as a JSON object…"</div></div>
+ <div class="center-txt">10,000+ chunks like this live across your knowledge base.</div>`},
+
+{stage:1, tag:'INDEXING · 2 OF 4', title:'Chunking', panel:['Chunking','Long documents are split into smaller, retrievable pieces so the retriever can match narrow, specific passages.'],
+ body:`<div class="flow">${['Chunk 1','Chunk 2','Chunk 3','Chunk 4','Chunk 5','…','Chunk 10,000'].map(c=>`<span class="chip">${c}</span>`).join('')}</div>
+ <div class="arrow-down">↓</div><div class="center-txt">Each chunk is small enough to embed and search independently.</div>`},
+
+{stage:2, tag:'INDEXING · 3 OF 4', title:'Document embeddings', panel:['Embedding model','An embedding model turns each chunk into a fixed-length vector that captures its meaning — independently of any query.'],
+ body:`<div class="flow"><span class="chip d">Chunk</span><span style="color:var(--muted2)">↓</span></div>
+ <div class="flow"><div class="card mono" style="font-size:12px">Embedding Model</div></div>
+ <div class="flow"><div class="vecbox">${['0.21','-0.54','0.83','…','0.12'].map(n=>`<span>${n}</span>`).join('')}</div></div>
+ <div class="center-txt">This happens once per chunk, at indexing time — not per query.</div>`},
+
+{stage:3, tag:'INDEXING · 4 OF 4', title:'Stored in the vector database', panel:['Vector database','Every chunk embedding is stored ahead of time, ready for fast similarity lookup once a query arrives.'],
+ body:`<div class="grid-mini" id="vdbGrid"></div><div class="center-txt" style="margin-top:10px">10,000 vectors, indexed and waiting.</div>`},
+
+{stage:4, tag:'QUERY · 1 OF 2', title:'A user asks a question', panel:['User query','Retrieval begins only when a real question arrives.'],
+ body:`<div class="card mono" style="max-width:460px;margin:0 auto;text-align:center;font-size:15px;color:var(--query)">"${QUERY}"</div>`},
+
+{stage:5, tag:'QUERY · 2 OF 2', title:'Query embedding', panel:['Query embedding','The same embedding model encodes the query into a vector in the same space as the document vectors — created independently of any document.'],
+ body:`<div class="flow"><span class="chip q">User Query</span></div><div class="arrow-down">↓</div>
+ <div class="flow"><div class="card mono" style="font-size:12px">Embedding Model</div></div><div class="arrow-down">↓</div>
+ <div class="flow"><div class="vecbox">${['0.18','-0.49','0.77','…','0.09'].map(n=>`<span>${n}</span>`).join('')}</div></div>`},
+
+{stage:6, tag:'RETRIEVAL', title:'Fast approximate search across 10,000 chunks', panel:['Retriever','The retriever performs fast approximate candidate retrieval by comparing the query vector to every stored vector using cosine/dot-product similarity — no deep reading of text, just vector geometry.'],
+ body:`<div class="grid-mini" id="searchGrid"></div>
+ <div class="center-txt" style="margin-top:10px">Scanning 10,000 stored vectors…</div>
+ <table class="scores" style="margin-top:6px"><tr><td>Chunk 17</td><td style="text-align:right"><span class="score-badge score-good">0.91</span></td></tr>
+ <tr><td>Chunk 42</td><td style="text-align:right"><span class="score-badge score-good">0.89</span></td></tr>
+ <tr><td>Chunk 5</td><td style="text-align:right"><span class="score-badge score-good">0.87</span></td></tr>
+ <tr><td style="color:var(--muted2)">… 47 more</td><td></td></tr></table>`},
+
+{stage:7, tag:'RETRIEVAL → RERANKING', title:'Top 50 candidates hand off to the Cross-Encoder', panel:['Handoff','Vector search narrows 10,000 chunks to 50 plausible candidates. Now a slower, far more careful model takes over — one pair at a time.'],
+ body:`<div class="flow"><span class="chip">10,000 chunks</span></div><div class="arrow-down">↓ vector similarity search</div>
+ <div class="flow"><span class="chip q">Top 50 Candidates</span></div><div class="arrow-down">↓</div>
+ <div class="flow"><div class="card" style="border-color:var(--attn);color:var(--attn);font-family:'Space Grotesk';font-size:16px">CROSS-ENCODER</div></div>`},
+
+{stage:8, tag:'CROSS-ENCODER · END-TO-END FLOW', sub:'Overview', title:'The complete flow inside a Cross-Encoder', panel:['Complete flow','Yeh ek Query+Document pair ka poora safar hai Cross-Encoder ke andar — tokenize, Transformer, self-attention, contextual representation, scoring. Har node ko neeche ke steps me zoom karke dekhte hain.'],
+ body:`<div class="flow"><span class="chip q">Query</span><span style="color:var(--muted2)">+</span><span class="chip d">Document</span></div><div class="arrow-down">↓</div>
+ <div class="flow"><span class="chip">Tokenization</span></div><div class="arrow-down">↓</div>
+ <div class="flow"><div class="card" style="border-color:var(--attn);color:var(--attn);font-family:'Space Grotesk'">Transformer</div></div><div class="arrow-down">↓</div>
+ <div class="flow"><span class="chip special">Self-Attention</span></div><div class="arrow-down">↓</div>
+ <div class="flow"><span class="chip">Contextual representation</span></div><div class="arrow-down">↓</div>
+ <div class="flow"><span class="chip">Classification / scoring layer</span></div><div class="arrow-down">↓</div>
+ <div class="flow"><span class="score-badge score-good" style="font-size:14px">Relevance score</span></div>
+ <div class="center-txt" style="margin-top:12px;max-width:440px;margin-left:auto;margin-right:auto">Query aur document ke tokens <b style="color:var(--text)">same</b> Transformer layers ke andar, self-attention ke through interact karte hain — simple word-matching nahi, poora contextual process.</div>`},
+
+{stage:8, tag:'CROSS-ENCODER · PAIRING', sub:'Pairing', title:'The query is paired with each candidate, one at a time', panel:['Pairing','The same query is combined separately with every candidate document. Nothing is batched conceptually — each pair will be run through the Transformer on its own.'],
+ body:`<div class="ce-q mono" style="text-align:center">QUERY — "${QUERY}"</div>
+ <div class="flow" style="margin-top:8px">${['Q + C17','Q + C42','Q + C5','Q + C9','…','Q + C50'].map(c=>`<span class="chip ${c.includes('17')?'q':''}">${c}</span>`).join('')}</div>
+ <div class="center-txt">Each pair below enters the Cross-Encoder separately.</div>`},
+
+{stage:8, tag:'CROSS-ENCODER · TOKENIZATION', sub:'Tokenize', title:'Step A — Tokenization', panel:['Tokenization','The query and the candidate document are tokenized and joined into one sequence, with special tokens marking the boundaries.'],
+ body:()=>ceHeader(P)+`<div class="ce-machine">${tokRow()}
+ <div class="center-txt" style="margin-top:8px"><span style="color:var(--attn)">[CLS]</span> marks the whole pair for scoring · <span style="color:var(--attn)">[SEP]</span> separates query from document</div></div>`},
+
+{stage:8, tag:'CROSS-ENCODER · EMBEDDING', sub:'Embed', title:'Token + position embeddings', panel:['Input representations','Each token becomes a vector, and positional information is added so the model knows token order.'],
+ body:()=>ceHeader(P)+`<div class="ce-machine">${vecRow()}</div>`},
+
+{stage:8, tag:'CROSS-ENCODER · TRANSFORMER', sub:'Layers', title:'Passing through Transformer layers', panel:['Transformer stack','The joint representation is pushed through several stacked Transformer layers. Each layer lets the representation absorb more context from the rest of the sequence.'],
+ body:()=>ceHeader(P)+`<div class="ce-machine"><div class="layer-stack" id="layerStack">${layerNames.map(n=>`<div class="layer">${n}</div>`).join('')}</div>
+ <div class="center-txt" style="margin-top:4px">Representations become progressively more contextual with each layer.</div></div>`},
+
+{stage:8, tag:'CROSS-ENCODER · SELF-ATTENTION', sub:'Attention', title:'Self-attention: every token interacts with every token', panel:['Self-attention','Query aur document ke tokens same Transformer layers ke andar, attention ke through interact karte hain. Yeh simple word-matching nahi hai — har token har doosre token ko dekhta hai, aur learned weights decide karte hain kaun sa connection zyada matter karta hai.'],
+ body:()=>ceHeader(P)+`<div class="ce-machine">${attnSVG()}
+ <div class="center-txt" style="max-width:440px;margin:10px auto 0">Thick glowing lines = strong learned attention (JWT↔JWT, React↔React, work↔tokens…). Faint lines = every other pair still interacts, just weakly. Side arcs = tokens also attend <i>within</i> their own sequence, building context before crossing over.</div></div>`},
+
+{stage:8, tag:'ATTENTION MECHANISM · 1 OF 4', sub:'Q / K / V', title:'Every token makes a Query, a Key and a Value', panel:['Query / Key / Value','Har token apne vector se teen naye vectors banata hai, learned weight matrices (Wq, Wk, Wv) se: Query — "main kya dhoondh raha hoon", Key — "mere paas kya hai", Value — "agar mujhe select kiya gaya to main kya info doonga". Yeh har token ke liye hota hai, sirf ek ke liye nahi.'],
+ body:()=>ceHeader(P)+`<div class="ce-machine"><div class="center-txt" style="margin-bottom:10px">Taking the query token <span class="chip q" style="font-size:11px;padding:3px 8px">JWT</span> as an example:</div>
+ <div class="qkv-row">${qkvVec('Query (Q)','query')}${qkvVec('Key (K)','doc')}${qkvVec('Value (V)','attn')}</div>
+ <div class="center-txt" style="margin-top:12px">Q asks a question · K advertises what a token contains · V carries the actual content to pass along</div></div>`},
+
+{stage:8, tag:'ATTENTION MECHANISM · 2 OF 4', sub:'Scores', title:'Score every other token: Query · Key', panel:['Attention scores','Query token ka Q-vector, sequence ke har token ke K-vector se dot-product liya jaata hai. Jitna zyada dot-product, utna zyada "match" — yeh raw relevance score hai, abhi tak koi probability nahi.'],
+ body:()=>ceHeader(P)+`<div class="ce-machine"><div class="center-txt" style="margin-bottom:10px">"JWT" (query) attending to every document token — raw scores:</div>
+ ${barChart('scoreBars',[
+   {l:'JWT (doc)',w:100,v:'8.4'},{l:'authentication',w:37,v:'3.1'},{l:'uses',w:24,v:'2.0'},
+   {l:'tokens',w:21,v:'1.8'},{l:'React',w:14,v:'1.2'},{l:'in',w:7,v:'0.6'},{l:'access',w:5,v:'0.4'},{l:'…',w:4,v:'0.3'}
+ ])}
+ <div class="center-txt" style="margin-top:10px">Q(JWT) · K(each token) → one raw number per token</div></div>`},
+
+{stage:8, tag:'ATTENTION MECHANISM · 3 OF 4', sub:'Softmax', title:'Softmax — turn scores into weights that sum to 1', panel:['Softmax','Raw scores ko softmax se guzara jaata hai — sab positive ho jaate hain aur total 100% ban jaata hai. Ab yeh proper "attention weights" hain: kitna percent dhyaan har token ko dena hai.'],
+ body:()=>ceHeader(P)+`<div class="ce-machine"><div class="center-txt" style="margin-bottom:10px">Same scores, normalized by softmax:</div>
+ ${barChart('softBars',[
+   {l:'JWT (doc)',w:71,v:'71%'},{l:'authentication',w:11,v:'11%'},{l:'uses',w:6,v:'6%'},
+   {l:'tokens',w:5,v:'5%'},{l:'React',w:4,v:'4%'},{l:'in',w:1,v:'1%'},{l:'access',w:1,v:'1%'},{l:'…',w:1,v:'1%'}
+ ])}
+ <div class="center-txt" style="margin-top:10px">"JWT" mostly attends to "JWT" in the document — but every token still gets a small share.</div></div>`},
+
+{stage:8, tag:'ATTENTION MECHANISM · 4 OF 4', sub:'Weighted Sum', title:'Weighted sum of Values → one new contextual vector', panel:['Weighted sum','Har token ke Value vector ko uske attention weight se multiply karke sab add kar diya jaata hai. Yeh naya vector — jisme puri sequence ka context mix ho chuka hai — ab query token "JWT" ki nayi representation ban jaata hai.'],
+ body:()=>ceHeader(P)+`<div class="ce-machine"><div class="token-row">
+ ${[['JWT(doc)',71],['authentication',11],['uses',6],['tokens',5],['React',4]].map(([t,w])=>`<span class="chip d" style="opacity:${(0.25+w/100).toFixed(2)};font-size:11px">${t} ×${w}%</span>`).join('')}
+ </div><div class="arrow-down">↓ Σ weight × Value</div>
+ <div class="mergevec"><div class="vecbox" style="font-size:12px">${['3.91','-1.02','2.44','…','0.87'].map(n=>`<span>${n}</span>`).join('')}</div></div>
+ <div class="center-txt" style="margin-top:10px">New contextual vector for "JWT" — no longer just its own meaning, but a blend shaped by the whole Query+Document sequence. This repeats for <i>every</i> token, including [CLS].</div></div>`},
+
+{stage:8, tag:'CROSS-ENCODER · MULTI-HEAD ATTENTION', sub:'Multi-Head', title:'Multiple attention heads, in parallel', panel:['Multi-head attention','Several attention heads run in parallel, each forming its own pattern of connections. They are combined afterward — no single head maps to one fixed human concept.'],
+ body:`<div class="ce-head"><div class="ce-q mono">QUERY + Chunk ${P.id}</div></div>
+ <div class="ce-machine"><div class="headwrap">${[0,1,2,3].map(i=>`<div class="headbox">${miniHead(i)}<div class="lbl">Head ${i+1}</div></div>`).join('')}</div>
+ <div class="center-txt" style="margin-top:8px">↓ Concatenate + linear combine</div></div>`},
+
+{stage:8, tag:'CROSS-ENCODER · FEED FORWARD', sub:'FFN', title:'Add & Norm, then Feed Forward', panel:['Layer internals','After attention, each layer adds a residual connection, normalizes, passes through a feed-forward network, then normalizes again — repeated for every Transformer layer.'],
+ body:`<div class="ce-machine"><div class="ffn-flow" id="ffnFlow">
+ <div class="step">Self-Attention</div><div class="step">Add &amp; Norm</div><div class="step">Feed Forward Network</div><div class="step">Add &amp; Norm</div></div>
+ <div class="center-txt" style="margin-top:10px">This block repeats for every Transformer layer, 1 → N.</div></div>`},
+
+{stage:8, tag:'CROSS-ENCODER · [CLS]', sub:'[CLS]', title:'The [CLS] representation', panel:['[CLS] token','After the final layer, the [CLS] position holds a representation of the entire query–document pair, shaped by every attention interaction that came before.'],
+ body:()=>ceHeader(P)+`<div class="ce-machine"><div class="token-row">
+ <span class="chip special cls-glow" style="font-size:15px;padding:9px 16px">[CLS]</span>
+ ${[...QTOK.slice(0,4),...DTOK.slice(0,4)].map(t=>`<span class="chip fade60" style="font-size:11px">${t}</span>`).join('')}
+ </div><div class="center-txt" style="margin-top:10px">[CLS] → final contextual representation of the Query + Document pair</div></div>`},
+
+{stage:9, tag:'CROSS-ENCODER · SCORING', sub:'Score', title:'Relevance scoring', panel:['Scoring head','[CLS] ka final vector — jo Q/K/V, dot-product scores, softmax aur weighted-sum wale process se kayi layers tak guzar chuka hai — ab ek chhoti scoring head (linear layer, optionally sigmoid) se guzarta hai aur ek single relevance number deta hai.'],
+ body:()=>ceHeader(P)+`<div class="ce-machine"><div class="flow"><span class="chip special">[CLS] representation</span></div><div class="arrow-down">↓ scoring head (linear layer)</div>
+ <div class="score-big" id="scoreBig">0.00</div><div class="center-txt">Query–Document Relevance for Chunk ${P.id}</div></div>`},
+
+{stage:9, tag:'CROSS-ENCODER · REPEAT', sub:'Repeat All', title:'Repeat for every candidate', panel:['Repetition','The full tokenize → Transformer → [CLS] → score process above runs again for every one of the 50 candidates — one full pass per pair, not a single shared computation.'],
+ body:`<table class="scores">${CAND.map(c=>`<tr><td>Q + C${c.id} → Cross-Encoder</td><td style="text-align:right"><span class="score-badge ${scoreClass(c.ce)}">${c.ce.toFixed(2)}</span></td></tr>`).join('')}
+ <tr><td style="color:var(--muted2)">… 44 more pairs</td><td></td></tr></table>`},
+
+{stage:10, tag:'RERANKING', title:'Retriever order vs. Cross-Encoder order', panel:['Reranking','The retriever\'s similarity ranking and the Cross-Encoder\'s relevance ranking can disagree — the Cross-Encoder\'s read of true relevance wins.'],
+ body:`<div class="rerank-cols"><div class="rerank-col"><h4>Retriever ranking</h4><div class="rerank-list">${[...CAND].sort((a,b)=>b.ret-a.ret).map(c=>`<div class="rerank-item"><span>C${c.id}</span><span>${c.ret.toFixed(2)}</span></div>`).join('')}</div></div>
+ <div class="rerank-col"><h4>Cross-Encoder ranking</h4><div class="rerank-list" id="rerankAfter">${[...CAND].sort((a,b)=>b.ce-a.ce).map(c=>`<div class="rerank-item"><span>C${c.id}</span><span>${c.ce.toFixed(2)}</span></div>`).join('')}</div></div></div>`},
+
+{stage:10, tag:'TOP 5 SELECTION', title:'Sorting by relevance, keeping the top 5', panel:['Top 5','Candidates are sorted by Cross-Encoder score; the top 5 move forward to the LLM, and the rest are dropped.'],
+ body:`<div class="rerank-list" style="width:260px;margin:0 auto">${[...CAND].sort((a,b)=>b.ce-a.ce).map((c,i)=>`<div class="rerank-item ${i<5?'top5':'faded'}"><span>C${c.id} — ${c.text.slice(0,26)}…</span><span>${c.ce.toFixed(2)}</span></div>`).join('')}
+ <div class="rerank-item faded"><span>… 45 more, discarded</span><span></span></div></div>`},
+
+{stage:11, tag:'GENERATION', title:'LLM produces the final answer', panel:['LLM','The query plus the top 5 reranked chunks are given to the LLM as context, which writes a grounded final answer.'],
+ body:`<div class="flow"><span class="chip q">User Query</span><span style="color:var(--muted2)">+</span><span class="chip">Top 5 Chunks</span></div><div class="arrow-down">↓ LLM</div>
+ <div class="answer-box">JWT authentication in React typically uses an access token stored in memory (or a secure cookie) and a longer-lived refresh token to silently renew it — the Cross-Encoder's top-ranked chunks about token storage and refresh flow are what make this answer specific and grounded.</div>`}
+];
+
+let idx=0, playing=false, timer=null, speed=1;
+const pipeEl=document.getElementById('pipe');
+PIPE.forEach((p,i)=>{
+  const b=document.createElement('button'); b.textContent=p; b.dataset.stage=i;
+  b.onclick=()=>{const t=STEPS.findIndex(s=>s.stage===i); if(t>=0){stop(); idx=t; render();}};
+  pipeEl.appendChild(b);
+  if(i<PIPE.length-1){const a=document.createElement('span'); a.className='arrow'; a.textContent='→'; pipeEl.appendChild(a);}
+});
+
+function render(){
+  const s=STEPS[idx];
+  document.getElementById('stageTag').textContent=s.tag;
+  document.getElementById('stageTitle').textContent=s.title;
+  document.getElementById('stageBody').innerHTML = typeof s.body==='function' ? s.body() : s.body;
+  document.getElementById('panelTitle').textContent=s.panel[0];
+  document.getElementById('panelText').textContent=s.panel[1];
+  const warn=document.getElementById('panelWarn'); warn.classList.remove('show');
+  document.getElementById('stepCount').textContent=`Step ${idx+1} / ${STEPS.length}`;
+  [...pipeEl.querySelectorAll('button')].forEach(b=>b.classList.toggle('active', +b.dataset.stage===s.stage));
+
+  const subnav=document.getElementById('ceSubnav');
+  if(s.sub){
+    subnav.classList.add('show');
+    subnav.innerHTML = STEPS.map((st,i)=> st.sub ? `<button data-i="${i}" class="${i===idx?'active':''}">${st.sub}</button>` : '').join('');
+    subnav.querySelectorAll('button').forEach(b=>b.onclick=()=>{stop(); idx=+b.dataset.i; render();});
+  } else {
+    subnav.classList.remove('show'); subnav.innerHTML='';
+  }
+
+
+  if(s.title.includes('vector database')){
+    const g=document.getElementById('vdbGrid'); if(g){let h='';for(let i=0;i<120;i++)h+=`<div class="dot ${i%13===2?'lit':''}"></div>`; g.innerHTML=h;}
+  }
+  if(s.title.includes('Fast approximate')){
+    const g=document.getElementById('searchGrid'); if(g){let h='';for(let i=0;i<120;i++)h+=`<div class="dot"></div>`; g.innerHTML=h;
+      let n=0; const t=setInterval(()=>{ if(n>=120){clearInterval(t);return;} const cells=g.children; cells[n].classList.add('lit'); if(n>4)cells[n-5].classList.remove('lit'); n+=6; },40);}
+  }
+  if(s.title.includes('Score every other token')) animateBars('scoreBars');
+  if(s.title.includes('Softmax')) animateBars('softBars');
+  if(s.title.includes('Transformer layers')){
+    const stack=document.getElementById('layerStack');
+    if(stack){let n=0; const t=setInterval(()=>{ [...stack.children].forEach(c=>c.classList.remove('active'));
+      if(n>=stack.children.length){clearInterval(t);return;} stack.children[n].classList.add('active','done'); n++; },420);}
+  }
+  if(s.title.includes('Feed Forward')){
+    const f=document.getElementById('ffnFlow');
+    if(f){let n=0; const t=setInterval(()=>{ [...f.children].forEach(c=>c.classList.remove('active'));
+      if(n>=f.children.length){clearInterval(t);return;} f.children[n].classList.add('active'); n++; },420);}
+  }
+  if(s.title.includes('Relevance scoring')){
+    const el=document.getElementById('scoreBig'); if(el){ let v=0; const target=P.ce; const t=setInterval(()=>{ v+=target/20; if(v>=target){v=target;clearInterval(t);} el.textContent=v.toFixed(2); el.className='score-big '+(target>=0.8?'':target>=0.55?'':''); },40);}
+  }
+}
+function next(){ if(idx<STEPS.length-1){idx++; render();} else {stop();} }
+function prev(){ if(idx>0){idx--; render();} }
+function stop(){ playing=false; clearInterval(timer); document.getElementById('btnPlay').textContent='▶ Play'; }
+function play(){ playing=true; document.getElementById('btnPlay').textContent='⏸ Pause'; clearInterval(timer); timer=setInterval(next, 3800/speed); }
+
+document.getElementById('btnNext').onclick=()=>{stop();next();};
+document.getElementById('btnPrev').onclick=()=>{stop();prev();};
+document.getElementById('btnRestart').onclick=()=>{stop();idx=0;render();};
+document.getElementById('btnPlay').onclick=()=>{playing?stop():play();};
+document.getElementById('playfull').onclick=()=>{idx=0;render();play();};
+document.querySelectorAll('[data-spd]').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('[data-spd]').forEach(x=>x.classList.remove('on')); b.classList.add('on');
+  speed=+b.dataset.spd; if(playing)play();
+});
+render();
+</script>
+</body>
+</html>
