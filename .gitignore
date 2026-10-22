@@ -1,0 +1,20 @@
+# Local credentials
+.env
+.env.*
+!.env.example
+
+# Python environments and generated files
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Local vector store data
+**/chroma_langchain_db/
+
+# Runtime logs and generated reports
+*.log
+8.rag-fusion/notebooklm_rag.pdf
+
+# Local Neo4j instance credentials
+13.graph-rag/Neo4j-*-Created-*.txt

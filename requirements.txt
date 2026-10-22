@@ -15,3 +15,4 @@ langchain_ollama
 langchain-ollama
 langchain_chroma
 langchain_cohere
+faiss-cpu

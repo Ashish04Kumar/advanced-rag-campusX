@@ -133,6 +133,11 @@ class RAGFusion:
         # Sort by accumulated score descending and return the documents
         docs_with_scores = doc_scores.values()
         sorted_docs = sorted(docs_with_scores, key=lambda x: x[0], reverse=True)
+        ##  [
+        ##      (0.048, Document_C),
+        ##      (0.032, Document_A),
+        ##      (0.016, Document_B)
+        ##  ]
         
         # log the sorted results
         logger.info(f"RRF Scores with documents: {docs_with_scores}")
@@ -148,10 +153,53 @@ class RAGFusion:
         if self.llm_chain:
             sub_queries = self._generate_subqueries(query)
 
-            all_retrieved_docs = [self._retrieve_documents(sub_query) for sub_query in sub_queries]
+            all_retrieved_docs = [self._retrieve_documents(sub_query) for sub_query in sub_queries] 
+            # [
+            #     [doc1, doc2, doc3],   
+            #     [doc4, doc5, doc6],   
+            #     [doc7, doc8, doc9]    
+            # ]
+            
             logger.info(f"Retrieved documents per sub-query: {[[doc.page_content[0:50] for doc in docs] for docs in all_retrieved_docs]}")
 
             fused_docs = self._reciprocal_rank_fusion(all_retrieved_docs)
             return fused_docs[:self.k]
         else:
             return self._retrieve_documents(query)[:self.k]
+
+
+
+
+
+"""
+from langchain_ollama import ChatOllama
+
+# Your existing retriever
+retriever = vectorstore.as_retriever(
+    search_kwargs={"k": 5}
+)
+
+# LLM
+llm = ChatOllama(
+    model="qwen3:4b"
+)
+
+# Create RAG Fusion
+rag_fusion = RAGFusion.from_llm(
+    llm=llm,
+    retriever=retriever,
+    num_subqueries=3,
+    k=5
+)
+
+# Query
+query = "How does RAG improve LLM responses?"
+
+# Run RAG Fusion
+results = rag_fusion.invoke(query)
+
+# Print final documents
+for i, doc in enumerate(results, start=1):
+    print(f"\n--- Document {i} ---")
+    print(doc.page_content)
+"""
